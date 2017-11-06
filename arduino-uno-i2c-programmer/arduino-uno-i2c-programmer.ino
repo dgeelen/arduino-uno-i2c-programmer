@@ -14,6 +14,8 @@
 #include <stdint.h>
 
 uint8_t buffer[BUFFER_LENGTH] = {}; // 128 uint8_t EEPROM data buffer
+bool repaint_menu( true );
+int target_port( 0x50 );
 
 enum wire_result {
 	wire_result_ok = 0,
@@ -46,7 +48,7 @@ void print_hex_byte( uint8_t b, bool prefix = true ) {
 	Serial.print( b, HEX );
 }
 
-void print_hex_word( uint8_t b, bool prefix = true ) {
+void print_hex_word( uint16_t b, bool prefix = true ) {
 	print_hex_byte( high_byte(b), prefix );
 	print_hex_byte( low_byte(b), false );
 }
@@ -67,10 +69,20 @@ void print_serial_error( uint8_t error ) {
 	Serial.println();
 }
 
-void ddc_print( bool intel_hex ) {
+#define DEBUG_PRINT( x ) do { \
+		Serial.print( #x ": " ); \
+		Serial.print( (x), HEX ); \
+		Serial.println(); \
+	} while( 0 );
+
+void ddc_print( unsigned int address, bool intel_hex ) {
 	const short bytes_per_row = 0x10;
 	const short rows = BUFFER_LENGTH / bytes_per_row;
 	for( short row = 0; row < rows; ++row ) {
+		//DEBUG_PRINT( row );
+		//DEBUG_PRINT( rows );
+		//DEBUG_PRINT( BUFFER_LENGTH );
+
 		// Start code
 		if( intel_hex )
 			Serial.print( ':' );
@@ -80,7 +92,7 @@ void ddc_print( bool intel_hex ) {
 			print_hex_byte( bytes_per_row, false );
 
 		// Address
-		print_hex_word( bytes_per_row*row, intel_hex );
+		print_hex_word( address + bytes_per_row*row, intel_hex );
 
 		if( !intel_hex )
 			Serial.print( " | " );
@@ -123,39 +135,6 @@ void ddc_print( bool intel_hex ) {
 		Serial.println( ":00000001FF" );
 }
 
-//void ddc_print() {
-	//const short bytes_per_row = 0x10;
-	//const short rows = BUFFER_LENGTH / bytes_per_row;
-	//for( short row = 0; row < rows; row++ ) {
-		//Serial.print(" (");
-		//if (row == 0) {
-			//Serial.print(0, HEX);
-		//}
-		//Serial.print(row * 16, HEX);
-		//Serial.print(") ");
-
-		//for (int half_col = 0; half_col < 2; half_col++) {
-			//for (int col = 0; col < 8; col++) {
-				//int index = (row * 16) + (half_col * 8) + col;
-				//uint8_t b = buffer[index];
-				//if (b < 16) {
-					//Serial.print(0, HEX);
-				//}
-				//Serial.print(b, HEX);
-				//Serial.print(" ");
-				////        Serial.print("["); Serial.print(index, HEX); Serial.print("]");
-			//}
-
-			//if (half_col == 0) {
-				//Serial.print("- ");
-			//}
-			//else {
-				//Serial.println();
-			//}
-		//}
-	//}
-//}
-
 void ddc_read( int address ) {
 	Serial.print( "Reading from address " );
 	print_hex_word( address );
@@ -169,12 +148,39 @@ void ddc_read( int address ) {
 	}
 
 	const int blocks = 128 / BUFFER_LENGTH;
-	for (int block = 0; block < blocks; block += BUFFER_LENGTH) {
+	for(int block = 0; block < blocks; block += BUFFER_LENGTH) {
 		Wire.requestFrom( address, BUFFER_LENGTH );
-		for (int i = 0; i < BUFFER_LENGTH; i++) {
+		for(int i = 0; i < BUFFER_LENGTH; i++) {
 			buffer[block + i] = Wire.read();
+			digitalWrite(LED_BUILTIN, i & 8 ? HIGH : LOW);
+		}
+	}
+
+	digitalWrite(LED_BUILTIN, LOW);
+	Serial.println("Finished reading.");
+}
+
+void dump_all_data( bool intel_hex ) {
+	Serial.print( "Dumping all data from address " );
+	print_hex_word( target_port );
+	Serial.println( "..." );
+
+	Wire.beginTransmission( target_port );
+	Wire.write( 0 ); // initial address (?)
+	if( uint8_t error = Wire.endTransmission() != 0 ) {
+		print_serial_error( error );
+		return;
+	}
+
+	int offset( 0 );
+	while( 1 ) {
+		Wire.requestFrom( target_port, BUFFER_LENGTH );
+		for(int i = 0; i < BUFFER_LENGTH; i++) {
+			buffer[i] = Wire.read();
 			digitalWrite(LED_BUILTIN, i&8 ? HIGH : LOW);
 		}
+		ddc_print( offset, intel_hex );
+		offset += BUFFER_LENGTH;
 	}
 
 	digitalWrite(LED_BUILTIN, LOW);
@@ -193,6 +199,7 @@ void ddc_scan() {
 		if( Wire.endTransmission() == wire_result_ok ) {
 			Serial.print( "Found open port at address " );
 			print_hex_byte( address );
+			Serial.println();
 			++nr_found;
 		}
 	}
@@ -204,7 +211,7 @@ void ddc_scan() {
 }
 
 int scan_for_newline( uint8_t* buffer, int len ) {
-	for (int i = 0; i < len; i++) {
+	for(int i = 0; i < len; i++) {
 		if( buffer[i] == '\n' ) {
 			return i;
 		}
@@ -213,7 +220,7 @@ int scan_for_newline( uint8_t* buffer, int len ) {
 }
 
 void to_upper( uint8_t* buffer, int len ) {
-	for (int i = 0; i < len; i++) {
+	for(int i = 0; i < len; i++) {
 		if( buffer[i] >= 'a' && buffer[i] <= 'z' ) {
 			buffer[i] -= 'a' - 'A';
 		}
@@ -237,7 +244,7 @@ uint8_t compute_intel_hex_checksum( uint8_t* buffer, int len ) {
 	return (~checksum) + 1;
 }
 
-int parse_intel_hex( uint8_t* buffer, int len, int& address, record_type& type ) throw() {
+int parse_intel_hex( uint8_t* buffer, int len, int& /*address*/, record_type& type ) throw() {
 	if( buffer[0] != ':' ) {
 		Serial.println( "Error: record must start with ':'" );
 		return 0;
@@ -323,7 +330,11 @@ void flash_data_from_serial() {
 					}
 					Serial.println();
 				}; break;
-				// default?
+				default: {
+					Serial.print("unhandled record type ");
+					print_hex_byte(type);
+					Serial.println();
+				}
 			}
 		}
 	}
@@ -347,48 +358,82 @@ void setup() {
 		delay( 100 );
 	}
 	Serial.println("NT68676 Flasher utility v0.1");
-	Serial.println("----------------------------");
+	Serial.println("--------------------------------------");
+	Serial.print(" Buffer size: " );
+	Serial.print( BUFFER_LENGTH, DEC );
+	Serial.println( "bytes" );
 }
 
-void loop() {
+void print_menu() {
 	Serial.println(" 1) Scan i2c bus");
-	Serial.println(" 2) Read i2c port");
-	Serial.println(" 3) Print data (human readable)");
-	Serial.println(" 4) Print data as Intel HEX");
-	Serial.println(" 5) Write data from Intel HEX");
+	Serial.print(" 2) Set target port (now: ");
+	print_hex_byte( target_port );
+	Serial.println( ")" );
+	Serial.println(" 3) Read i2c port");
+	Serial.println(" 4) Print data (human readable)");
+	Serial.println(" 5) Print data as Intel HEX");
+	Serial.println(" 6) Dump data from port (human readable)");
+	Serial.println(" 7) Dump data from port as Intel hex");
+	Serial.println(" 8) Write data from Intel HEX");
 	Serial.println("> ");
+}
+void loop() {
+	if( repaint_menu ) print_menu();
+
+	// Always repaint, unless no key is pressed
+	// (then this resets below)
+	repaint_menu = true;
 
 	// Timeout allows for blinking the led
-//	while(!Serial.available());
+	//	while(!Serial.available());
 	Serial.setTimeout( 250 );
-	switch(Serial.parseInt())   {
+	switch(Serial.parseInt())	 {
 		case 0: { // time out reached
+			repaint_menu = false;
 			blink_status_led();
 		}; break;
-		case 1: {
+		case 1: { // Scan i2c bus
 			ddc_scan();
 		}; break;
-		case 2: {
+		case 2: { // set target port
+			Serial.println( "port to scan?" );
 			Serial.setTimeout( 5000 ); // 5sec
 			byte address = Serial.parseInt();
 			if( address > 7 ) {
-				ddc_read( address );
+				Serial.println( "Scanning port 0x" );
+				Serial.print( address, HEX );
+				Serial.println( ", please waiting..." );
+				target_port = address;
 			}
 			else {
 				Serial.println( "No valid address provided" );
 			}
 		}; break;
-		case 3: {
-			ddc_print( false );
+		case 3: { // read bytes from port
+			ddc_read( target_port );
 		}; break;
-		case 4: {
-			ddc_print( true );
+		case 4: { // print buffer
+			ddc_print( 0, false );
 		}; break;
-		case 5: {
+		case 5: { // print buffer hex
+			ddc_print( 0, true );
+		}; break;
+		case 6: { // dump data
+			dump_all_data( false );
+		}; break;
+		case 7: { // dump data hex
+			dump_all_data( true );
+		}; break;
+		case 8: { // upload
 			//ut();
 		}; break;
 		default: {
 			Serial.println("Error: Menu item does not exist.");
 		}; break;
+	}
+
+	if( repaint_menu ) {
+		// Some space before the next menu
+		Serial.println("\n\n\n");
 	}
 }
